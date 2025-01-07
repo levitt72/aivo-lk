@@ -106,10 +106,11 @@ def ai_callable(
     *,
     name: str | None = None,
     description: str | _UseDocMarker = USE_DOCSTRING,
-    auto_retry: bool = False,
+    auto_retry: bool = False,   
+    function_metadata: dict | None = None,
 ) -> Callable:
     def deco(f):
-        _set_metadata(f, name=name, desc=description, auto_retry=auto_retry)
+        _set_metadata(f, name=name, desc=description, auto_retry=auto_retry, function_metadata=function_metadata)
         return f
 
     return deco
@@ -143,52 +144,61 @@ class FunctionContext:
 
         metadata: _AIFncMetadata = getattr(fnc, METADATA_ATTR)
         fnc_name = metadata.name
+        params = metadata.function_metadata.get('params')
         if fnc_name in self._fncs:
             raise ValueError(f"duplicate ai_callable name: {fnc_name}")
 
         sig = inspect.signature(fnc)
-
-        # get_type_hints with include_extra=True is needed when using Annotated
-        # using typing.get_args with param.Annotated is returning an empty tuple for some reason
-        type_hints = typing.get_type_hints(
-            fnc, include_extras=True
-        )  # Annotated[T, ...] -> T
         args = dict[str, FunctionArgInfo]()
 
-        for name, param in sig.parameters.items():
-            if param.kind not in (
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                inspect.Parameter.KEYWORD_ONLY,
-            ):
-                raise ValueError(f"{fnc_name}: unsupported parameter kind {param.kind}")
-
-            inner_th, type_info = _extract_types(type_hints[name])
-
-            if not is_type_supported(inner_th):
-                raise ValueError(
-                    f"{fnc_name}: unsupported type {inner_th} for parameter {name}"
+        # Use provided parameters if available, otherwise fall back to signature
+        if params:
+            for param_name, param_info in params.items():
+                param_type = param_info.get('type', str)
+                args[param_name] = FunctionArgInfo(
+                    name=param_name,
+                    description=param_info.get('description', ''),
+                    type=param_type,
+                    default=param_info.get('default'),
+                    choices=tuple(param_info.get('choices', ()))
                 )
+        else:
+            # Existing signature-based parameter processing
+            type_hints = typing.get_type_hints(fnc, include_extras=True)
+            for name, param in sig.parameters.items():
+                if param.kind not in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                ):
+                    raise ValueError(f"{fnc_name}: unsupported parameter kind {param.kind}")
 
-            desc = type_info.description if type_info else ""
-            choices = type_info.choices if type_info else ()
+                inner_th, type_info = _extract_types(type_hints[name])
 
-            if (
-                isinstance(inner_th, type)
-                and issubclass(inner_th, enum.Enum)
-                and not choices
-            ):
-                # the enum must be a str or int (and at least one value)
-                # this is verified by is_type_supported
-                choices = tuple([item.value for item in inner_th])
-                inner_th = type(choices[0])
+                if not is_type_supported(inner_th):
+                    raise ValueError(
+                        f"{fnc_name}: unsupported type {inner_th} for parameter {name}"
+                    )
 
-            args[name] = FunctionArgInfo(
-                name=name,
-                description=desc,
-                type=inner_th,
-                default=param.default,
-                choices=choices,
-            )
+                desc = type_info.description if type_info else ""
+                choices = type_info.choices if type_info else ()
+
+                if (
+                    isinstance(inner_th, type)
+                    and issubclass(inner_th, enum.Enum)
+                    and not choices
+                ):
+                    # the enum must be a str or int (and at least one value)
+                    # this is verified by is_type_supported
+                    choices = tuple([item.value for item in inner_th])
+                    inner_th = type(choices[0])
+
+                args[name] = FunctionArgInfo(
+                    name=name,
+                    description=desc,
+                    type=inner_th,
+                    default=param.default,
+                    choices=choices,
+                )
 
         self._fncs[metadata.name] = FunctionInfo(
             name=metadata.name,
@@ -208,6 +218,8 @@ class _AIFncMetadata:
     name: str
     description: str
     auto_retry: bool
+    function_metadata: dict | None
+    parameters: dict | None
 
 
 def _extract_types(annotation: type) -> tuple[type, TypeInfo | None]:
@@ -245,6 +257,8 @@ def _set_metadata(
     name: str | None = None,
     desc: str | _UseDocMarker = USE_DOCSTRING,
     auto_retry: bool = False,
+    function_metadata: dict | None = None,
+    parameters: dict | None = None
 ) -> None:
     if isinstance(desc, _UseDocMarker):
         docstring = inspect.getdoc(f)
@@ -256,7 +270,7 @@ def _set_metadata(
         desc = docstring
 
     metadata = _AIFncMetadata(
-        name=name or f.__name__, description=desc, auto_retry=auto_retry
+        name=name or f.__name__, description=desc, auto_retry=auto_retry, function_metadata=function_metadata, parameters=parameters
     )
 
     setattr(f, METADATA_ATTR, metadata)
