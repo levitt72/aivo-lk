@@ -1,5 +1,19 @@
 # livekit-plugins-elevenlabs
 
+## 0.7.14
+
+### Patch Changes
+
+- use connection pool for elevenlabs websocket persistant connection - [#1546](https://github.com/livekit/agents/pull/1546) ([@jayeshp19](https://github.com/jayeshp19))
+
+- remove update options from tts synthesis stream - [#1546](https://github.com/livekit/agents/pull/1546) ([@jayeshp19](https://github.com/jayeshp19))
+
+## 0.7.13
+
+### Patch Changes
+
+- 11labs: ensure websocket connection is closed properly - [#1468](https://github.com/livekit/agents/pull/1468) ([@davidzhao](https://github.com/davidzhao))
+
 ## 0.7.12
 
 ### Patch Changes
