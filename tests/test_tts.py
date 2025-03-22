@@ -17,6 +17,7 @@ from livekit.plugins import (
     deepgram,
     elevenlabs,
     google,
+    neuphonic,
     openai,
     playai,
     rime,
@@ -46,9 +47,6 @@ async def _assert_valid_synthesized_audio(
 
 SYNTHESIZE_TTS: list[Callable[[], tts.TTS]] = [
     pytest.param(lambda: elevenlabs.TTS(), id="elevenlabs"),
-    pytest.param(
-        lambda: elevenlabs.TTS(encoding="pcm_44100"), id="elevenlabs.pcm_44100"
-    ),
     pytest.param(lambda: openai.TTS(), id="openai"),
     pytest.param(lambda: google.TTS(), id="google"),
     pytest.param(lambda: azure.TTS(), id="azure"),
@@ -57,6 +55,7 @@ SYNTHESIZE_TTS: list[Callable[[], tts.TTS]] = [
     pytest.param(lambda: deepgram.TTS(), id="deepgram"),
     pytest.param(lambda: playai.TTS(), id="playai"),
     pytest.param(lambda: rime.TTS(), id="rime"),
+    pytest.param(lambda: neuphonic.TTS(), id="neuphonic"),
 ]
 
 
@@ -79,9 +78,6 @@ async def test_synthesize(tts_factory):
 STREAM_SENT_TOKENIZER = tokenize.basic.SentenceTokenizer(min_sentence_len=20)
 STREAM_TTS: list[Callable[[], tts.TTS]] = [
     pytest.param(lambda: elevenlabs.TTS(), id="elevenlabs"),
-    pytest.param(
-        lambda: elevenlabs.TTS(encoding="pcm_44100"), id="elevenlabs.pcm_44100"
-    ),
     pytest.param(lambda: cartesia.TTS(), id="cartesia"),
     pytest.param(
         lambda: agents.tts.StreamAdapter(
@@ -109,6 +105,7 @@ STREAM_TTS: list[Callable[[], tts.TTS]] = [
         ),
         id="aws.stream",
     ),
+    pytest.param(lambda: neuphonic.TTS(), id="neuphonic"),
 ]
 
 

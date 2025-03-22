@@ -30,11 +30,15 @@ from livekit.agents import (
 
 import openai
 
+from .log import logger
 from .models import TTSModels, TTSVoices
 from .utils import AsyncAzureADTokenProvider
 
 OPENAI_TTS_SAMPLE_RATE = 48000
 OPENAI_TTS_CHANNELS = 1
+
+DEFAULT_MODEL = "gpt-4o-mini-tts"
+DEFAULT_VOICE = "ash"
 
 
 @dataclass
@@ -42,15 +46,17 @@ class _TTSOptions:
     model: TTSModels | str
     voice: TTSVoices | str
     speed: float
+    instructions: Optional[str] = None
 
 
 class TTS(tts.TTS):
     def __init__(
         self,
         *,
-        model: TTSModels | str = "tts-1",
-        voice: TTSVoices | str = "alloy",
+        model: TTSModels | str = DEFAULT_MODEL,
+        voice: TTSVoices | str = DEFAULT_VOICE,
         speed: float = 1.0,
+        instructions: Optional[str] = None,
         base_url: str | None = None,
         api_key: str | None = None,
         client: openai.AsyncClient | None = None,
@@ -74,6 +80,7 @@ class TTS(tts.TTS):
             model=model,
             voice=voice,
             speed=speed,
+            instructions=instructions,
         )
 
         self._client = client or openai.AsyncClient(
@@ -92,18 +99,25 @@ class TTS(tts.TTS):
         )
 
     def update_options(
-        self, *, model: TTSModels | None, voice: TTSVoices | None, speed: float | None
+        self,
+        *,
+        model: TTSModels | str | None,
+        voice: TTSVoices | str | None,
+        speed: float | None,
+        instructions: Optional[str] = None,
     ) -> None:
         self._opts.model = model or self._opts.model
         self._opts.voice = voice or self._opts.voice
         self._opts.speed = speed or self._opts.speed
+        self._opts.instructions = instructions or self._opts.instructions
 
     @staticmethod
     def create_azure_client(
         *,
-        model: TTSModels = "tts-1",
-        voice: TTSVoices = "alloy",
+        model: TTSModels | str = DEFAULT_MODEL,
+        voice: TTSVoices | str = DEFAULT_VOICE,
         speed: float = 1.0,
+        instructions: str | None = None,
         azure_endpoint: str | None = None,
         azure_deployment: str | None = None,
         api_version: str | None = None,
@@ -137,7 +151,13 @@ class TTS(tts.TTS):
             base_url=base_url,
         )  # type: ignore
 
-        return TTS(model=model, voice=voice, speed=speed, client=azure_client)
+        return TTS(
+            model=model,
+            voice=voice,
+            speed=speed,
+            instructions=instructions,
+            client=azure_client,
+        )
 
     def synthesize(
         self,
@@ -172,9 +192,10 @@ class ChunkedStream(tts.ChunkedStream):
         oai_stream = self._client.audio.speech.with_streaming_response.create(
             input=self.input_text,
             model=self._opts.model,
-            voice=self._opts.voice,  # type: ignore
+            voice=self._opts.voice,
             response_format="opus",
             speed=self._opts.speed,
+            instructions=self._opts.instructions,
             timeout=httpx.Timeout(30, connect=self._conn_options.timeout),
         )
 
@@ -184,6 +205,7 @@ class ChunkedStream(tts.ChunkedStream):
             num_channels=OPENAI_TTS_CHANNELS,
         )
 
+        @utils.log_exceptions(logger=logger)
         async def _decode_loop():
             try:
                 async with oai_stream as stream:
@@ -195,16 +217,13 @@ class ChunkedStream(tts.ChunkedStream):
         decode_task = asyncio.create_task(_decode_loop())
 
         try:
+            emitter = tts.SynthesizedAudioEmitter(
+                event_ch=self._event_ch,
+                request_id=request_id,
+            )
             async for frame in decoder:
-                if self._event_ch.closed:
-                    break
-                self._event_ch.send_nowait(
-                    tts.SynthesizedAudio(
-                        frame=frame,
-                        request_id=request_id,
-                    )
-                )
-            await decode_task
+                emitter.push(frame)
+            emitter.flush()
         except openai.APITimeoutError:
             raise APITimeoutError()
         except openai.APIStatusError as e:

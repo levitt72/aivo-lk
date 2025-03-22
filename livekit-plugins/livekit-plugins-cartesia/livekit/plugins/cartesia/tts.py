@@ -23,7 +23,6 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import aiohttp
-from livekit import rtc
 from livekit.agents import (
     APIConnectionError,
     APIConnectOptions,
@@ -74,7 +73,7 @@ class TTS(tts.TTS):
     def __init__(
         self,
         *,
-        model: TTSModels | str = "sonic",
+        model: TTSModels | str = "sonic-2",
         language: str = "en",
         encoding: TTSEncoding = "pcm_s16le",
         voice: str | list[float] = TTSDefaultVoiceId,
@@ -91,7 +90,7 @@ class TTS(tts.TTS):
         See https://docs.cartesia.ai/reference/web-socket/stream-speech/stream-speech for more details on the the Cartesia API.
 
         Args:
-            model (TTSModels, optional): The Cartesia TTS model to use. Defaults to "sonic-english".
+            model (TTSModels, optional): The Cartesia TTS model to use. Defaults to "sonic-2".
             language (str, optional): The language code for synthesis. Defaults to "en".
             encoding (TTSEncoding, optional): The audio encoding format. Defaults to "pcm_s16le".
             voice (str | list[float], optional): The voice ID or embedding array.
@@ -128,6 +127,8 @@ class TTS(tts.TTS):
         self._pool = utils.ConnectionPool[aiohttp.ClientWebSocketResponse](
             connect_cb=self._connect_ws,
             close_cb=self._close_ws,
+            max_session_duration=300,
+            mark_refreshed_on_get=True,
         )
         self._streams = weakref.WeakSet[SynthesizeStream]()
 
@@ -149,10 +150,13 @@ class TTS(tts.TTS):
 
         return self._session
 
+    def prewarm(self) -> None:
+        self._pool.prewarm()
+
     def update_options(
         self,
         *,
-        model: TTSModels | None = None,
+        model: TTSModels | str | None = None,
         language: str | None = None,
         voice: str | list[float] | None = None,
         speed: TTSVoiceSpeed | float | None = None,
@@ -165,7 +169,7 @@ class TTS(tts.TTS):
         and emotion. If any parameter is not provided, the existing value will be retained.
 
         Args:
-            model (TTSModels, optional): The Cartesia TTS model to use. Defaults to "sonic-english".
+            model (TTSModels, optional): The Cartesia TTS model to use. Defaults to "sonic-2".
             language (str, optional): The language code for synthesis. Defaults to "en".
             voice (str | list[float], optional): The voice ID or embedding array.
             speed (TTSVoiceSpeed | float, optional): Voice Control - Speed (https://docs.cartesia.ai/user-guides/voice-control)
@@ -251,19 +255,17 @@ class ChunkedStream(tts.ChunkedStream):
                 ),
             ) as resp:
                 resp.raise_for_status()
+                emitter = tts.SynthesizedAudioEmitter(
+                    event_ch=self._event_ch,
+                    request_id=request_id,
+                )
                 async for data, _ in resp.content.iter_chunks():
                     for frame in bstream.write(data):
-                        self._event_ch.send_nowait(
-                            tts.SynthesizedAudio(
-                                request_id=request_id,
-                                frame=frame,
-                            )
-                        )
+                        emitter.push(frame)
 
                 for frame in bstream.flush():
-                    self._event_ch.send_nowait(
-                        tts.SynthesizedAudio(request_id=request_id, frame=frame)
-                    )
+                    emitter.push(frame)
+                emitter.flush()
         except asyncio.TimeoutError as e:
             raise APITimeoutError() from e
         except aiohttp.ClientResponseError as e:
@@ -323,22 +325,10 @@ class SynthesizeStream(tts.SynthesizeStream):
                 sample_rate=self._opts.sample_rate,
                 num_channels=NUM_CHANNELS,
             )
-
-            last_frame: rtc.AudioFrame | None = None
-
-            def _send_last_frame(*, segment_id: str, is_final: bool) -> None:
-                nonlocal last_frame
-                if last_frame is not None:
-                    self._event_ch.send_nowait(
-                        tts.SynthesizedAudio(
-                            request_id=request_id,
-                            segment_id=segment_id,
-                            frame=last_frame,
-                            is_final=is_final,
-                        )
-                    )
-
-                    last_frame = None
+            emitter = tts.SynthesizedAudioEmitter(
+                event_ch=self._event_ch,
+                request_id=request_id,
+            )
 
             while True:
                 msg = await ws.receive()
@@ -358,18 +348,16 @@ class SynthesizeStream(tts.SynthesizeStream):
 
                 data = json.loads(msg.data)
                 segment_id = data.get("context_id")
+                emitter._segment_id = segment_id
 
                 if data.get("data"):
                     b64data = base64.b64decode(data["data"])
                     for frame in audio_bstream.write(b64data):
-                        _send_last_frame(segment_id=segment_id, is_final=False)
-                        last_frame = frame
+                        emitter.push(frame)
                 elif data.get("done"):
                     for frame in audio_bstream.flush():
-                        _send_last_frame(segment_id=segment_id, is_final=False)
-                        last_frame = frame
-
-                    _send_last_frame(segment_id=segment_id, is_final=True)
+                        emitter.push(frame)
+                    emitter.flush()
                     if segment_id == request_id:
                         # we're not going to receive more frames, end stream
                         break
